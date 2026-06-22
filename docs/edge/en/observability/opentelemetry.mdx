@@ -1,0 +1,184 @@
+---
+title: OpenTelemetry
+description: Native OpenTelemetry spans for kickoffs, tasks, agents, tools, LLM calls, memory, and flows
+icon: signal-stream
+mode: "wide"
+---
+
+# Native OpenTelemetry Instrumentation
+
+crewAI emits native [OpenTelemetry](https://opentelemetry.io/) spans for every
+major step of execution: crew kickoffs, task runs, agent steps, tool calls,
+LLM requests, flow methods, memory reads/writes, knowledge queries, A2A
+delegations, agent reasoning, and LLM guardrails.
+
+The instrumentation is **always on** — there is nothing to install or
+configure inside crewAI itself. When no OpenTelemetry SDK is registered,
+spans degrade to no-ops with effectively zero overhead. The moment your
+application installs a `TracerProvider`, the same spans become real spans
+that are exported to whatever backend you've configured.
+
+This is the right integration point if you already operate an OpenTelemetry
+collector (Datadog, Honeycomb, New Relic, Jaeger, Tempo, Splunk, Elastic,
+or self-hosted OTLP) and want crewAI traces to land alongside your existing
+service traces — with correlated logs.
+
+## Quickstart
+
+Install the SDK and an exporter — crewAI itself only depends on the
+OpenTelemetry **API**, never the SDK.
+
+```bash
+uv add opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+Then install a provider once at startup, before you import or instantiate
+any crew:
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+provider = TracerProvider(resource=Resource.create({"service.name": "my-crew-app"}))
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+
+from crewai import Agent, Crew, Task
+
+crew = Crew(agents=[...], tasks=[...])
+crew.kickoff()  # spans are now exported to your OTLP endpoint
+```
+
+## What gets instrumented
+
+Every span uses the tracer name `"crewai"` and follows the
+`crewai.<component>.<field>` attribute naming convention.
+
+| Span name              | Where it opens                            | Key attributes                                                  |
+| ---------------------- | ----------------------------------------- | --------------------------------------------------------------- |
+| `execute crew`         | `Crew.kickoff`                            | `crewai.crew.name`, `crewai.crew.id`                            |
+| `execute task`         | `Task.execute_sync` / `Task.execute_async`| `crewai.task.name`, `crewai.task.id`                            |
+| `execute agent`        | `Agent.execute_task`                      | `crewai.agent.role`, `crewai.agent.id`                          |
+| `call tool`            | `BaseTool.run` / `Tool.run`               | `crewai.tool.name`                                              |
+| `call llm`             | `LLM.call` and provider completions       | `crewai.llm.model`                                              |
+| `execute flow`         | `Flow.kickoff_async`                      | `crewai.flow.name`, `crewai.flow.id`                            |
+| `execute flow method`  | `Flow._execute_method`                    | `crewai.flow.name`, `crewai.flow.method`                        |
+| `resume flow`          | `Flow._resume_async_body`                 | `crewai.flow.name`, `crewai.flow.id`                            |
+| `remember memory`      | `UnifiedMemory.remember`                  | `crewai.memory.source_type`                                     |
+| `recall memory`        | `UnifiedMemory.recall`                    | `crewai.memory.source_type`, `crewai.memory.depth`              |
+| `query knowledge`      | `Knowledge.query` / `Knowledge.aquery`    | `crewai.knowledge.sources`                                      |
+| `a2a delegate`         | `aexecute_a2a_delegation`                 | `crewai.a2a.endpoint`, `crewai.a2a.is_multiturn`, `crewai.a2a.turn_number` |
+| `agent reason`         | `ReasoningHandler.handle_agent_reasoning` | `crewai.agent.role`, `crewai.task.id`                           |
+| `guard llm`            | `LLMGuardrail.__call__`                   | `crewai.guardrail.type`                                         |
+
+Spans nest naturally — a `call tool` span sits inside its `execute agent`
+parent, which sits inside `execute task`, which sits inside `execute crew`.
+
+## Correlating logs with traces
+
+Because crewAI uses the OpenTelemetry API everywhere, any
+`logging.getLogger(...)` call made inside an active crewAI span will
+automatically inherit the active `trace_id` and `span_id` once you attach
+the OTel `LoggingHandler` to the root logger:
+
+```python
+import logging
+
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+log_provider = LoggerProvider()
+log_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
+logging.getLogger().addHandler(LoggingHandler(level=logging.INFO, logger_provider=log_provider))
+```
+
+Now every log line emitted while a span is active carries the span's
+identifiers, letting you jump from a trace to its logs (and back) in
+your observability backend.
+
+## Sampler configuration
+
+`TracerProvider` defaults to sampling every span. For production workloads
+you'll usually want head sampling. The most common choices:
+
+```python
+from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+
+# Sample 10% of root traces, but always inherit the parent's decision so a
+# downstream service can force-sample its callers.
+sampler = ParentBased(root=TraceIdRatioBased(0.1))
+provider = TracerProvider(sampler=sampler)
+```
+
+```python
+# "Always sample errors": let your application escalate sampling for
+# specific traces by setting `trace.get_current_span().set_attribute(...)`
+# and pairing TraceIdRatioBased with a custom sampler that promotes a
+# trace to "RECORD_AND_SAMPLE" when an error attribute is set.
+```
+
+For testing, swap in `ALWAYS_ON` or `ALWAYS_OFF`:
+
+```python
+from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+
+provider = TracerProvider(sampler=ALWAYS_ON)
+```
+
+## Adding custom attributes
+
+You can enrich crewAI spans from anywhere in user code (a tool, a
+callback, a custom Flow method) using the standard OpenTelemetry API:
+
+```python
+from opentelemetry import trace
+
+def my_tool(...):
+    span = trace.get_current_span()
+    span.set_attribute("myapp.tenant_id", tenant_id)
+    span.set_attribute("myapp.request_priority", "high")
+    ...
+```
+
+These attributes attach to whichever crewAI span is currently active
+(usually the surrounding `call tool` span).
+
+## Disabling
+
+There are two equally valid ways to disable instrumentation:
+
+- **Do not install a `TracerProvider`.** Spans become no-ops with
+  near-zero cost.
+- **Install a sampler that always returns "drop".** Useful when you have
+  one provider you want to keep around for other services:
+
+  ```python
+  from opentelemetry.sdk.trace import TracerProvider
+  from opentelemetry.sdk.trace.sampling import ALWAYS_OFF
+
+  provider = TracerProvider(sampler=ALWAYS_OFF)
+  trace.set_tracer_provider(provider)
+  ```
+
+You can also set `OTEL_SDK_DISABLED=true` in the environment — the SDK
+honors it and returns no-op tracers regardless of what you configure.
+
+## Continuity across HITL resume
+
+When a `Flow` resumes after a Human-in-the-Loop pause, the resumed trace
+is causally related to the paused trace but not in a parent/child
+relationship. crewAI exposes a `follows_from` helper for this:
+
+```python
+from crewai.telemetry.otel import follows_from, operation
+
+with operation("resume flow", links=[follows_from(prev_trace_id, prev_span_id)]):
+    ...
+```
+
+The link carries the `crewai.link.type = "follows_from"` attribute so
+downstream tooling can render it as a causal-but-not-parent edge.

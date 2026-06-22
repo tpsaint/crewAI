@@ -4,6 +4,37 @@ description: "Product updates, improvements, and bug fixes for CrewAI"
 icon: "clock"
 mode: "wide"
 ---
+<Update label="Unreleased">
+  ## Native OpenTelemetry instrumentation
+
+  CrewAI now ships native [OpenTelemetry](https://opentelemetry.io/) spans
+  for every major step of execution: crew kickoffs, task runs, agent
+  steps, tool calls, LLM requests, flow methods, memory reads/writes,
+  knowledge queries, A2A delegations, agent reasoning, and LLM
+  guardrails. See the new [OpenTelemetry guide](/en/observability/opentelemetry)
+  for the complete attribute reference and configuration recipes.
+
+  **What this means for existing OTel users:** if your application already
+  installs a `TracerProvider` (Datadog, Honeycomb, Tempo, Jaeger, OTLP,
+  etc.) you will start seeing crewAI spans alongside your service traces
+  automatically — no code changes required. Logs emitted while a crewAI
+  span is active are correlated to the trace via the standard
+  OpenTelemetry `LoggingHandler`.
+
+  Spans are opt-in by construction: when no SDK provider is installed,
+  every instrumentation point degrades to a no-op span with effectively
+  zero overhead. To enable head sampling for production:
+
+  ```python
+  from opentelemetry.sdk.trace import TracerProvider
+  from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
+
+  # Sample 10% of root traces.
+  provider = TracerProvider(sampler=ParentBased(root=TraceIdRatioBased(0.1)))
+  ```
+
+</Update>
+
 <Update label="Jun 18, 2026">
   ## v1.14.8a2
 

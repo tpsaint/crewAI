@@ -327,6 +327,7 @@
                     "pages": [
                       "edge/en/observability/tracing",
                       "edge/en/observability/overview",
+                      "edge/en/observability/opentelemetry",
                       "edge/en/observability/arize-phoenix",
                       "edge/en/observability/braintrust",
                       "edge/en/observability/datadog",
