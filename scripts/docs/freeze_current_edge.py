@@ -22,11 +22,16 @@ from pathlib import Path
 import subprocess
 import sys
 
-from crewai_devtools.docs_versioning import (
-    InvalidVersionError,
-    MissingEdgeSourcesError,
-    freeze,
-)
+try:  # defer import so script can print a helpful message if package missing
+    from crewai_devtools.docs_versioning import (
+        InvalidVersionError,
+        MissingEdgeSourcesError,
+        freeze,
+    )
+except ModuleNotFoundError:
+    InvalidVersionError = None  # type: ignore
+    MissingEdgeSourcesError = None  # type: ignore
+    freeze = None  # type: ignore
 
 
 def _repo_root() -> Path:
@@ -48,6 +53,14 @@ def main() -> int:
     args = parser.parse_args()
 
     docs_root = _repo_root() / "docs"
+    if freeze is None:
+        print(
+            "ERROR: required package 'crewai_devtools' not found.\n"
+            "Install it in your environment (pip install crewai-devtools) or adjust PYTHONPATH.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
         result = freeze(args.version, docs_root)
     except InvalidVersionError as e:
